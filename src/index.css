@@ -1,0 +1,66 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Fira+Code:wght@400;500&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+    font-family: 'Inter', sans-serif;
+    background-color: #0f172a;
+    color: #f8fafc;
+}
+
+.mono {
+    font-family: 'Fira Code', monospace;
+}
+
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+::-webkit-scrollbar-track {
+    background: #1e293b;
+}
+
+::-webkit-scrollbar-thumb {
+    background: #475569;
+    border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: #64748b;
+}
+
+/* Optimized for Printing PDF Reports */
+@media print {
+    body {
+        background-color: white !important;
+        color: black !important;
+    }
+    .bg-slate-900, .bg-slate-950, .bg-slate-800, .bg-indigo-950\/20 {
+        background-color: transparent !important;
+        border: 1px solid #e2e8f0 !important;
+        color: black !important;
+        box-shadow: none !important;
+    }
+    .text-slate-400, .text-slate-500, .text-slate-200 {
+        color: #475569 !important;
+    }
+    .text-blue-400, .text-emerald-400, .text-indigo-400 {
+        color: #2563eb !important;
+        font-weight: bold;
+    }
+    .border-slate-800 {
+        border-color: #e2e8f0 !important;
+    }
+    .print\:hidden {
+        display: none !important;
+    }
+    svg, canvas {
+        max-width: 100% !important;
+    }
+    header, footer {
+      border-bottom: 2px solid #2563eb !important;
+    }
+}
