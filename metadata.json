@@ -1,0 +1,5 @@
+{
+  "name": "OMCI Analyzer Pro",
+  "description": "A professional-grade OMCI (GPON) log analyzer and visualizer featuring sequence diagrams, ME tree structures, and AI-driven anomaly detection based on G.988 standards.",
+  "requestFramePermissions": []
+}
