@@ -9,6 +9,7 @@ import SequenceDiagram from './components/SequenceDiagram';
 import TreeDiagram from './components/TreeDiagram';
 
 type ViewMode = 'dashboard' | 'explorer' | 'service' | 'sequence' | 'tree' | 'ai';
+type DirectionFilter = 'both' | 'olt' | 'onu';
 
 const App: React.FC = () => {
   const [data, setData] = useState<AnalysisResult | null>(null);
@@ -20,6 +21,11 @@ const App: React.FC = () => {
   const [aiResult, setAiResult] = useState<string | null>(null);
   const [aiLoading, setAiLoading] = useState(false);
   const [showFailedList, setShowFailedList] = useState(false);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [directionFilter, setDirectionFilter] = useState<DirectionFilter>('both');
+  
+  // Theo dõi nếu điều hướng đến gói tin từ bên ngoài
+  const [isExternalNav, setIsExternalNav] = useState(false);
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -54,8 +60,25 @@ const App: React.FC = () => {
 
   const sortedMessages = useMemo(() => {
     if (!data) return [];
-    return [...data.messages].sort((a, b) => a.index - b.index);
-  }, [data]);
+    let msgs = [...data.messages];
+    
+    // Filter by Direction
+    if (directionFilter === 'olt') {
+      msgs = msgs.filter(m => m.direction === OmciDirection.OLT_TO_ONU);
+    } else if (directionFilter === 'onu') {
+      msgs = msgs.filter(m => m.direction === OmciDirection.ONU_TO_OLT);
+    }
+
+    // Filter by Search Term
+    if (searchTerm) {
+      msgs = msgs.filter(m => 
+        m.meClassName.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        m.meInstance.toLowerCase().includes(searchTerm.toLowerCase()) ||
+        m.messageType.toLowerCase().includes(searchTerm.toLowerCase())
+      );
+    }
+    return msgs.sort((a, b) => a.index - b.index);
+  }, [data, searchTerm, directionFilter]);
 
   const failedPackets = useMemo(() => {
     if (!data) return [];
@@ -81,18 +104,32 @@ const App: React.FC = () => {
     };
   }, [data]);
 
+  const meSuggestions = useMemo(() => {
+    if (!data || !searchTerm || viewMode !== 'dashboard') return [];
+    return Object.keys(data.stats).filter(name => 
+      name.toLowerCase().includes(searchTerm.toLowerCase())
+    ).slice(0, 8);
+  }, [data, searchTerm, viewMode]);
+
   const processedPackets = useMemo(() => {
     if (!data) return [];
     const result: (OmciMessage | { type: 'group'; messages: OmciMessage[]; id: string })[] = [];
     let currentGroup: OmciMessage[] = [];
 
+    // Nếu đang search hoặc lọc direction, không gom nhóm để dễ nhìn kết quả
+    if (searchTerm || directionFilter !== 'both') {
+      return sortedMessages;
+    }
+
     sortedMessages.forEach((msg, idx) => {
-      const isMib = msg.messageType.toLowerCase().includes('mib upload') || msg.messageType.toLowerCase().includes('mib next');
+      // MIB Upload bao gồm cả "MIB Upload Next"
+      const isMib = /mib upload|mib next|mib reset/i.test(msg.messageType);
+      
       if (isMib) {
         currentGroup.push(msg);
       } else {
         if (currentGroup.length > 0) {
-          if (currentGroup.length > 2) {
+          if (currentGroup.length > 1) { 
             result.push({ type: 'group', messages: [...currentGroup], id: `group-${idx}` });
           } else {
             result.push(...currentGroup);
@@ -104,11 +141,9 @@ const App: React.FC = () => {
     });
     if (currentGroup.length > 0) result.push({ type: 'group', messages: currentGroup, id: 'group-end' });
     return result;
-  }, [sortedMessages, data]);
+  }, [sortedMessages, data, searchTerm, directionFilter]);
 
-  // Logic điều hướng và tự động mở nhóm
   const navigateToPacket = (msg: OmciMessage) => {
-    // Tìm xem gói tin này có nằm trong group nào không để tự động expand
     const containingGroup = (processedPackets as any[]).find(
       p => p.type === 'group' && p.messages.some((m: OmciMessage) => m.id === msg.id)
     );
@@ -117,30 +152,48 @@ const App: React.FC = () => {
       setExpandedGroups(prev => ({ ...prev, [containingGroup.id]: true }));
     }
 
+    setIsExternalNav(true);
     setSelectedMsg(msg);
     setViewMode('explorer');
   };
 
-  // Tự động cuộn đến gói tin khi viewMode chuyển sang explorer
+  const handleEntityClick = (entityStr: string) => {
+    if (!data) return;
+    const found = data.messages.find(m => `${m.meClassName} (${m.meInstance})` === entityStr);
+    if (found) {
+      setSelectedMsg(found);
+    }
+  };
+
+  const handleSelectSuggestion = (meName: string) => {
+    setSearchTerm(meName);
+    setViewMode('explorer');
+  };
+
+  // Logic cuộn nội bộ
   useEffect(() => {
-    if (viewMode === 'explorer' && selectedMsg) {
-      // Delay một chút để DOM kịp render nếu vừa mới expand group
+    if (viewMode === 'explorer' && selectedMsg && isExternalNav) {
       const timer = setTimeout(() => {
         const element = document.getElementById(`packet-row-${selectedMsg.id}`);
-        if (element) {
-          element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        const container = document.getElementById('packet-explorer-container');
+        if (element && container) {
+          container.scrollTo({
+            top: element.offsetTop - 40,
+            behavior: 'smooth'
+          });
         }
-      }, 100);
+        setIsExternalNav(false);
+      }, 150);
       return () => clearTimeout(timer);
     }
-  }, [viewMode, selectedMsg]);
+  }, [viewMode, selectedMsg, isExternalNav]);
 
   const ServiceModelGrid = () => (
     <div className="space-y-8">
       <div className="flex items-center justify-between">
         <h3 className="text-lg font-bold text-blue-500 flex items-center gap-2">
            <i className="fas fa-project-diagram"></i>
-           Provisioning Connectivity Graph
+           OMCI Service Model
         </h3>
         <button 
           onClick={() => handleAiAnalysis('service')}
@@ -153,8 +206,11 @@ const App: React.FC = () => {
       <div className="grid grid-cols-1 gap-4">
         {serviceNodes.connected.length > 0 ? serviceNodes.connected.map((link, idx) => (
           <div key={idx} className="flex items-center gap-6 p-4 bg-slate-950 rounded-xl border border-slate-800 group hover:border-blue-500 transition-all">
-            <div className="flex-1 text-right">
-              <span className="text-xs font-bold text-slate-300 block">{link.from.split('(')[0]}</span>
+            <div 
+              className="flex-1 text-right cursor-pointer hover:text-blue-400 transition-colors"
+              onClick={() => handleEntityClick(link.from)}
+            >
+              <span className="text-xs font-bold text-slate-300 block group-hover:text-blue-400">{link.from.split('(')[0]}</span>
               <span className="text-[10px] font-mono text-slate-500">{link.from.match(/\(.*\)/)?.[0]}</span>
             </div>
             <div className="flex flex-col items-center min-w-[140px]">
@@ -163,8 +219,11 @@ const App: React.FC = () => {
                  <div className="absolute right-0 -top-1 w-2 h-2 bg-blue-600 rotate-45 shadow-[0_0_8px_rgba(37,99,235,0.6)]"></div>
               </div>
             </div>
-            <div className="flex-1">
-              <span className="text-xs font-bold text-emerald-400 block">{link.to}</span>
+            <div 
+              className="flex-1 cursor-pointer hover:text-emerald-300 transition-colors"
+              onClick={() => handleEntityClick(link.to)}
+            >
+              <span className="text-xs font-bold text-emerald-400 block group-hover:text-emerald-300">{link.to}</span>
               <span className="text-[10px] text-slate-500">Resource Allocated</span>
             </div>
           </div>
@@ -180,7 +239,11 @@ const App: React.FC = () => {
           <h4 className="text-[10px] font-black text-slate-500 uppercase mb-4 tracking-widest">Standalone / Isolated Entities</h4>
           <div className="flex flex-wrap gap-2">
             {serviceNodes.isolated.map((node, i) => (
-              <div key={i} className="px-3 py-1.5 bg-slate-900 border border-slate-800 rounded-lg text-[10px] font-medium text-slate-400">
+              <div 
+                key={i} 
+                onClick={() => handleEntityClick(node)}
+                className="px-3 py-1.5 bg-slate-900 border border-slate-800 rounded-lg text-[10px] font-medium text-slate-400 cursor-pointer hover:border-blue-500 hover:text-blue-400 transition-all"
+              >
                 {node}
               </div>
             ))}
@@ -209,29 +272,73 @@ const App: React.FC = () => {
         </div>
       ) : (
         <div className="p-6 max-w-[1600px] mx-auto space-y-6">
-          <div className="flex flex-wrap items-center justify-between gap-4 bg-slate-900 border border-slate-800 p-4 rounded-2xl shadow-xl">
-            <div className="flex items-center gap-4">
-               <div className="flex bg-slate-950 p-1 rounded-xl border border-slate-800">
-                {(['dashboard', 'explorer', 'service', 'sequence', 'tree', 'ai'] as const).map(tab => (
-                  <button key={tab} onClick={() => setViewMode(tab)} className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all capitalize ${viewMode === tab ? 'bg-blue-600 text-white shadow-md' : 'text-slate-400 hover:text-slate-200'}`}>
-                    {tab === 'explorer' ? 'Packet List' : (tab === 'service' ? 'Service Model' : (tab === 'ai' ? 'AI Insights' : tab))}
-                  </button>
-                ))}
+          <div className="space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-4 bg-slate-900 border border-slate-800 p-4 rounded-2xl shadow-xl">
+              <div className="flex items-center gap-4">
+                 <div className="flex bg-slate-950 p-1 rounded-xl border border-slate-800">
+                  {(['dashboard', 'explorer', 'service', 'sequence', 'tree', 'ai'] as const).map(tab => (
+                    <button key={tab} onClick={() => setViewMode(tab)} className={`px-4 py-1.5 rounded-lg text-xs font-bold transition-all capitalize ${viewMode === tab ? 'bg-blue-600 text-white shadow-md' : 'text-slate-400 hover:text-slate-200'}`}>
+                      {tab === 'explorer' ? 'Packet List' : (tab === 'service' ? 'Service Model' : (tab === 'ai' ? 'AI Insights' : tab))}
+                    </button>
+                  ))}
+                </div>
+                <div className="h-8 w-px bg-slate-800 mx-2"></div>
+                <div className="flex flex-col">
+                  <span className="text-[8px] font-black text-slate-500 uppercase tracking-widest">Active File</span>
+                  <span className="text-xs font-bold text-blue-400">{fileName}</span>
+                </div>
               </div>
-              <div className="h-8 w-px bg-slate-800 mx-2"></div>
-              <div className="flex flex-col">
-                <span className="text-[8px] font-black text-slate-500 uppercase tracking-widest">Active File</span>
-                <span className="text-xs font-bold text-blue-400">{fileName}</span>
+              
+              <div className="flex items-center gap-3">
+                <button onClick={() => handleAiAnalysis()} className="bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-500 hover:to-blue-500 text-white p-2 px-4 rounded-xl text-xs font-bold shadow-lg transition-all flex items-center gap-2">
+                  <i className="fas fa-robot"></i> Run AI Check
+                </button>
+                <button onClick={() => { setData(null); setViewMode('dashboard'); setFileName(''); setSearchTerm(''); }} className="bg-rose-600 hover:bg-rose-500 text-white p-2 px-4 rounded-xl text-xs font-bold shadow-lg transition-all flex items-center gap-2">
+                  <i className="fas fa-chevron-left"></i> New Analysis
+                </button>
               </div>
             </div>
-            
-            <div className="flex items-center gap-3">
-              <button onClick={() => handleAiAnalysis()} className="bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-500 hover:to-blue-500 text-white p-2 px-4 rounded-xl text-xs font-bold shadow-lg transition-all flex items-center gap-2">
-                <i className="fas fa-robot"></i> Run AI Check
-              </button>
-              <button onClick={() => { setData(null); setViewMode('dashboard'); setFileName(''); }} className="bg-rose-600 hover:bg-rose-500 text-white p-2 px-4 rounded-xl text-xs font-bold shadow-lg transition-all flex items-center gap-2">
-                <i className="fas fa-chevron-left"></i> New Analysis
-              </button>
+
+            {/* ME Search Bar & Suggestions */}
+            <div className="relative z-40">
+              <div className="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                <i className="fas fa-search text-slate-500 text-sm"></i>
+              </div>
+              <input 
+                type="text" 
+                placeholder="Search OMCI ME (Class, Instance or Type)..." 
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="w-full bg-slate-900/50 border border-slate-800 text-slate-200 text-sm rounded-2xl py-3 pl-11 pr-4 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all shadow-inner"
+              />
+              {searchTerm && (
+                <button 
+                  onClick={() => setSearchTerm('')}
+                  className="absolute inset-y-0 right-0 pr-4 flex items-center text-slate-500 hover:text-slate-300"
+                >
+                  <i className="fas fa-times-circle"></i>
+                </button>
+              )}
+              
+              {/* Suggestions List - Only on Dashboard */}
+              {meSuggestions.length > 0 && viewMode === 'dashboard' && (
+                <div className="absolute mt-2 w-full bg-slate-900 border border-slate-800 rounded-xl shadow-2xl overflow-hidden animate-in fade-in slide-in-from-top-2 duration-200">
+                   <div className="p-2 border-b border-slate-800 text-[10px] font-black uppercase text-slate-500 px-4">Detected Managed Entities</div>
+                   {meSuggestions.map((name, idx) => (
+                     <button 
+                       key={idx}
+                       onClick={() => handleSelectSuggestion(name)}
+                       className="w-full text-left px-4 py-3 text-xs font-bold text-slate-300 hover:bg-blue-600/20 hover:text-white transition-colors flex items-center justify-between group"
+                     >
+                       <span className="flex items-center gap-2">
+                         <i className="fas fa-microchip text-blue-500 group-hover:scale-110 transition-transform"></i>
+                         {name}
+                       </span>
+                       <i className="fas fa-arrow-right text-[10px] opacity-0 group-hover:opacity-100 transition-opacity"></i>
+                     </button>
+                   ))}
+                </div>
+              )}
             </div>
           </div>
 
@@ -305,13 +412,28 @@ const App: React.FC = () => {
               )}
 
               {viewMode === 'explorer' && (
-                <div className="bg-slate-900 border border-slate-800 rounded-2xl shadow-xl overflow-hidden">
+                <div className="bg-slate-900 border border-slate-800 rounded-2xl shadow-xl overflow-hidden h-full flex flex-col">
                   <div className="p-4 bg-slate-950/50 border-b border-slate-800 flex justify-between items-center sticky top-0 z-20">
-                    <h3 className="text-sm font-black uppercase tracking-widest text-slate-400">Packet Explorer</h3>
+                    <h3 className="text-sm font-black uppercase tracking-widest text-slate-400">
+                      {searchTerm ? `Search Results: ${searchTerm}` : 'Packet Explorer'}
+                    </h3>
+                    
+                    <div className="flex items-center gap-2 bg-slate-900 p-1 rounded-lg border border-slate-800">
+                      <span className="text-[9px] font-black text-slate-500 uppercase px-2">Direction</span>
+                      {(['both', 'olt', 'onu'] as DirectionFilter[]).map(f => (
+                        <button 
+                          key={f}
+                          onClick={() => setDirectionFilter(f)}
+                          className={`px-2 py-1 rounded text-[10px] font-bold transition-all ${directionFilter === f ? 'bg-blue-600 text-white shadow-md' : 'text-slate-500 hover:text-slate-300'}`}
+                        >
+                          {f === 'both' ? 'Both' : f.toUpperCase()}
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                  <div className="overflow-auto max-h-[750px]">
+                  <div id="packet-explorer-container" className="overflow-auto max-h-[700px] flex-1 scroll-smooth">
                     <table className="w-full text-left text-sm whitespace-nowrap">
-                      <thead className="text-[10px] font-black uppercase text-slate-500 bg-slate-950/30 sticky top-0 backdrop-blur-md">
+                      <thead className="text-[10px] font-black uppercase text-slate-500 bg-slate-950/30 sticky top-0 backdrop-blur-md z-10">
                         <tr>
                           <th className="px-6 py-4">#</th>
                           <th className="px-6 py-4">Direction</th>
@@ -323,28 +445,39 @@ const App: React.FC = () => {
                       </thead>
                       <tbody>
                         {processedPackets.map((item, i) => {
-                          if ('type' in item && item.type === 'group') {
+                          if (!searchTerm && directionFilter === 'both' && 'type' in item && item.type === 'group') {
                             const isExpanded = expandedGroups[item.id];
+                            const groupTitle = item.messages[0].messageType.includes('Reset') ? 'MIB Reset Sequence' : 'MIB Sequence Block';
                             return (
                               <React.Fragment key={item.id}>
-                                <tr onClick={() => setExpandedGroups(prev => ({ ...prev, [item.id]: !isExpanded }))} className="bg-indigo-950/20 border-y border-indigo-500/10 cursor-pointer hover:bg-indigo-900/30">
+                                <tr onClick={() => setExpandedGroups(prev => ({ ...prev, [item.id]: !isExpanded }))} className="bg-indigo-950/20 border-y border-indigo-500/10 cursor-pointer hover:bg-indigo-900/30 group">
                                   <td colSpan={6} className="px-6 py-3">
                                     <div className="flex items-center gap-3 text-indigo-400 font-bold text-xs">
-                                      <i className={`fas fa-chevron-${isExpanded ? 'down' : 'right'}`}></i>
-                                      MIB Sequence Block ({item.messages.length} packets)
+                                      <i className={`fas fa-chevron-${isExpanded ? 'down' : 'right'} transition-transform`}></i>
+                                      <span className="flex items-center gap-2">
+                                        <i className="fas fa-layer-group opacity-50"></i>
+                                        {groupTitle} ({item.messages.length} packets)
+                                      </span>
                                     </div>
                                   </td>
                                 </tr>
                                 {isExpanded && item.messages.map(m => (
-                                   <PacketRow key={m.id} msg={m} isSelected={selectedMsg?.id === m.id} onClick={() => setSelectedMsg(m)} />
+                                   <PacketRow key={m.id} msg={m} isSelected={selectedMsg?.id === m.id} onClick={() => { setSelectedMsg(m); setIsExternalNav(false); }} />
                                 ))}
                               </React.Fragment>
                             );
                           } else {
                             const msg = item as OmciMessage;
-                            return <PacketRow key={msg.id} msg={msg} isSelected={selectedMsg?.id === msg.id} onClick={() => setSelectedMsg(msg)} />;
+                            return <PacketRow key={msg.id} msg={msg} isSelected={selectedMsg?.id === msg.id} onClick={() => { setSelectedMsg(msg); setIsExternalNav(false); }} />;
                           }
                         })}
+                        {processedPackets.length === 0 && (
+                          <tr>
+                            <td colSpan={6} className="px-6 py-20 text-center text-slate-500 italic">
+                              No packets found matching your criteria.
+                            </td>
+                          </tr>
+                        )}
                       </tbody>
                     </table>
                   </div>
@@ -420,7 +553,9 @@ const App: React.FC = () => {
                         <div>
                            <p className="text-[10px] font-black text-slate-500 uppercase mb-3 tracking-widest">Extracted Attributes</p>
                            <div className="space-y-1.5">
-                             {Object.entries(selectedMsg.data).map(([k, v]) => (
+                             {Object.entries(selectedMsg.data)
+                               .filter(([k]) => !/Destination Bit|Acknowledge Request|Acknowledgement|CPCS-UU|CPCS-SDU|CRC32/i.test(k))
+                               .map(([k, v]) => (
                                <div key={k} className="flex flex-col p-2.5 bg-slate-950 rounded-lg border border-slate-800/60">
                                  <span className="text-[10px] text-slate-500 font-bold mb-1">{k}</span>
                                  <span className="text-xs text-white font-mono break-all">{v}</span>
@@ -465,7 +600,7 @@ const PacketRow: React.FC<{ msg: OmciMessage, isSelected: boolean, onClick: () =
     <td className="px-6 py-4">
       <span className={`flex items-center gap-2 font-black text-[9px] uppercase ${msg.direction === OmciDirection.OLT_TO_ONU ? 'text-blue-500' : 'text-emerald-500'}`}>
         <i className={`fas fa-arrow-${msg.direction === OmciDirection.OLT_TO_ONU ? 'right' : 'left'}`}></i>
-        {msg.direction === OmciDirection.OLT_TO_ONU ? 'OLT >' : 'ONU >'}
+        {msg.direction === OmciDirection.OLT_TO_ONU ? 'OLT to ONU' : 'ONU to OLT'}
       </span>
     </td>
     <td className="px-6 py-4 font-bold text-slate-200 text-xs">{msg.messageType}</td>
