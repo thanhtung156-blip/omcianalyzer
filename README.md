@@ -18,3 +18,12 @@ View your app in AI Studio: https://ai.studio/apps/drive/1amBKDIFFz5moI0jdZ-wLwi
 2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
 3. Run the app:
    `npm run dev`
+
+## CI/CD
+
+This project includes GitHub Actions workflows for continuous integration and deployment:
+
+- **CI Workflow** (`.github/workflows/ci.yml`): Runs on every push and pull request to validate builds
+- **Deploy Workflow** (`.github/workflows/deploy.yml`): Automatically deploys to GitHub Pages on every push to the main branch
+
+The app is automatically deployed to: https://thanhtung156-blip.github.io/omcianalyzer/
