@@ -18,7 +18,6 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
             <p className="text-xs text-slate-400 font-medium uppercase tracking-widest">GPON G.988 Diagnostics</p>
           </div>
         </div>
-        {/* Removed Documentation link as requested */}
         <nav className="flex items-center gap-6">
         </nav>
       </header>
@@ -27,7 +26,7 @@ const Layout: React.FC<LayoutProps> = ({ children }) => {
       </main>
       <footer className="h-10 border-t border-slate-900 flex items-center px-6 justify-between text-[10px] text-slate-500 bg-slate-950 print:hidden">
         <p>&copy; 2024 OMCI Analyzer Pro</p>
-        <p>Compliance: ITU-T G.988</p>
+        <p>Compliance: ITU-T G.988 | Version 0.1</p>
       </footer>
     </div>
   );

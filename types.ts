@@ -45,5 +45,6 @@ export interface AnalysisResult {
 export interface TopologyNode {
   name: string;
   type: 'OLT' | 'ONU' | 'TCONT' | 'GEM' | 'UNI' | 'BRIDGE';
+  entityId?: string;
   children?: TopologyNode[];
 }
