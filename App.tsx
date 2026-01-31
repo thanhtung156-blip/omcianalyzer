@@ -74,6 +74,54 @@ const App: React.FC = () => {
     return msgs.sort((a, b) => a.index - b.index);
   }, [data, searchTerm, directionFilter, onlyErrors]);
 
+  const processedPackets = useMemo(() => {
+    if (!data) return [];
+    if (searchTerm || directionFilter !== 'both' || onlyErrors) {
+      return sortedMessages;
+    }
+
+    const result: (OmciMessage | { type: 'group'; messages: OmciMessage[]; id: string; groupType: 'mib' | 'avc' })[] = [];
+    let i = 0;
+    
+    while (i < sortedMessages.length) {
+      const msg = sortedMessages[i];
+      const isMib = /mib upload|mib next|mib reset/i.test(msg.messageType);
+      const isAvc = /attribute value change/i.test(msg.messageType);
+
+      if (isMib) {
+        let group = [msg];
+        let j = i + 1;
+        while (j < sortedMessages.length && /mib upload|mib next|mib reset/i.test(sortedMessages[j].messageType)) {
+          group.push(sortedMessages[j]);
+          j++;
+        }
+        if (group.length > 1) {
+          result.push({ type: 'group', messages: group, id: `mib-group-${i}`, groupType: 'mib' });
+          i = j;
+          continue;
+        }
+      }
+
+      if (isAvc) {
+        let group = [msg];
+        let j = i + 1;
+        while (j < sortedMessages.length && /attribute value change/i.test(sortedMessages[j].messageType)) {
+          group.push(sortedMessages[j]);
+          j++;
+        }
+        if (group.length > 5) {
+          result.push({ type: 'group', messages: group, id: `avc-group-${i}`, groupType: 'avc' });
+          i = j;
+          continue;
+        }
+      }
+
+      result.push(msg);
+      i++;
+    }
+    return result;
+  }, [sortedMessages, data, searchTerm, directionFilter, onlyErrors]);
+
   const failedPackets = useMemo(() => {
     if (!data) return [];
     return data.messages.filter(m => m.isError);
@@ -104,35 +152,6 @@ const App: React.FC = () => {
       name.toLowerCase().includes(searchTerm.toLowerCase())
     ).slice(0, 8);
   }, [data, searchTerm, viewMode]);
-
-  const processedPackets = useMemo(() => {
-    if (!data) return [];
-    const result: (OmciMessage | { type: 'group'; messages: OmciMessage[]; id: string })[] = [];
-    let currentGroup: OmciMessage[] = [];
-
-    if (searchTerm || directionFilter !== 'both' || onlyErrors) {
-      return sortedMessages;
-    }
-
-    sortedMessages.forEach((msg, idx) => {
-      const isMib = /mib upload|mib next|mib reset/i.test(msg.messageType);
-      if (isMib) {
-        currentGroup.push(msg);
-      } else {
-        if (currentGroup.length > 0) {
-          if (currentGroup.length > 1) { 
-            result.push({ type: 'group', messages: [...currentGroup], id: `group-${idx}` });
-          } else {
-            result.push(...currentGroup);
-          }
-          currentGroup = [];
-        }
-        result.push(msg);
-      }
-    });
-    if (currentGroup.length > 0) result.push({ type: 'group', messages: currentGroup, id: 'group-end' });
-    return result;
-  }, [sortedMessages, data, searchTerm, directionFilter, onlyErrors]);
 
   const navigateToPacket = (msg: OmciMessage) => {
     const containingGroup = (processedPackets as any[]).find(
@@ -183,156 +202,234 @@ const App: React.FC = () => {
   }, [data]);
 
   /**
-   * Cực kỳ chi tiết giải mã ME 171 VLAN Tagging Operation Table (16 bytes)
-   * Theo chuẩn ITU-T G.988
+   * GIẢI MÃ VLAN FILTER LIST (ME 84)
    */
-  const decodeVlanTableDetailed = (hex: string) => {
-    if (hex.length < 32) return null;
-    const data = hex.match(/.{1,2}/g)!.map(byte => parseInt(byte, 16));
+  const decodeVlanFilterList = (hexData: string) => {
+    const cleanHex = hexData.replace(/[^0-9a-fA-F]/g, '');
+    if (!cleanHex || cleanHex.length < 4) return null;
     
-    // Byte 0-1: Filter Outer
-    const fOuterPri = (data[0] >> 4) & 0x0F;
-    const fOuterVid = ((data[0] & 0x0F) << 8) | data[1];
-    
-    // Byte 2-3: Filter Inner
-    const fInnerPri = (data[2] >> 4) & 0x0F;
-    const fInnerVid = ((data[2] & 0x0F) << 8) | data[3];
+    // Mỗi VLAN ID chiếm 2 bytes (4 hex chars)
+    const vlanIds = cleanHex.match(/.{1,4}/g) || [];
+    const validVlans = vlanIds
+      .map(hex => parseInt(hex, 16))
+      .filter(id => id > 0 && id <= 4095);
 
-    // Byte 4: Ethertype
-    const ethType = data[4] & 0x0F;
-
-    // Byte 5: Treatment Flags
-    const tagsToRemove = (data[5] >> 6) & 0x03;
-    
-    // Byte 6-7: Treatment Outer
-    const tOuterPri = (data[6] >> 4) & 0x0F;
-    const tOuterVid = ((data[6] & 0x0F) << 8) | data[7];
-    const tOuterTpid = (data[6] >> 1) & 0x03; // Thường là byte 6 bit 1-2
-
-    // Byte 8-9: Treatment Inner
-    const tInnerPri = (data[8] >> 4) & 0x0F;
-    const tInnerVid = ((data[8] & 0x0F) << 8) | data[9];
-
-    const getVidLabel = (v: number) => v === 4096 ? 'Any' : (v === 4095 ? 'Untagged' : v);
-    const getPriLabel = (p: number) => p === 15 ? 'Any' : (p === 8 ? 'Untagged' : p);
+    if (validVlans.length === 0) return null;
 
     return (
-      <div className="bg-indigo-950/40 p-3 rounded-lg border border-indigo-500/30 mt-2 space-y-3 shadow-lg">
-        <div className="flex items-center justify-between border-b border-indigo-500/20 pb-1.5">
-          <span className="text-[10px] font-black text-indigo-400 uppercase tracking-widest">G.988 Bit-Level Decoding (ME 171)</span>
-          <span className="text-[9px] font-mono text-slate-500 bg-slate-900 px-1.5 py-0.5 rounded">16-byte Entry</span>
+      <div className="mt-4 space-y-2 select-text font-mono text-[10px]">
+        <div className="bg-emerald-950/40 border-l-2 border-emerald-500 p-2 mb-1">
+          <h5 className="text-[9px] font-black text-emerald-400 uppercase tracking-widest flex items-center gap-2">
+            <i className="fas fa-filter"></i> VLAN FILTER LIST DECODER
+          </h5>
         </div>
-        
-        <div className="space-y-2">
-          {/* Filtering Section */}
-          <div>
-            <p className="text-[9px] font-bold text-slate-500 uppercase mb-1 flex items-center gap-1"><i className="fas fa-filter text-[8px]"></i> Filter Conditions</p>
-            <div className="grid grid-cols-2 gap-x-4 gap-y-1 pl-2 border-l border-slate-800">
-              <div className="text-[10px] text-slate-400">Outer Pri: <span className="text-blue-400 font-bold">{getPriLabel(fOuterPri)}</span></div>
-              <div className="text-[10px] text-slate-400">Outer VID: <span className="text-blue-400 font-bold">{getVidLabel(fOuterVid)}</span></div>
-              <div className="text-[10px] text-slate-400">Inner Pri: <span className="text-emerald-400 font-bold">{getPriLabel(fInnerPri)}</span></div>
-              <div className="text-[10px] text-slate-400">Inner VID: <span className="text-emerald-400 font-bold">{getVidLabel(fInnerVid)}</span></div>
-              <div className="text-[10px] text-slate-400 col-span-2">EtherType Filter: <span className="text-indigo-400 font-bold">{ethType === 0 ? 'None' : (ethType === 1 ? '0x0800' : 'Other')}</span></div>
-            </div>
-          </div>
-
-          {/* Treatment Section */}
-          <div>
-            <p className="text-[9px] font-bold text-slate-500 uppercase mb-1 flex items-center gap-1"><i className="fas fa-magic text-[8px]"></i> Treatment (Actions)</p>
-            <div className="grid grid-cols-2 gap-x-4 gap-y-1 pl-2 border-l border-slate-800">
-              <div className="text-[10px] text-slate-400 col-span-2">Tags to Remove: <span className="text-rose-400 font-bold">{tagsToRemove} tag(s)</span></div>
-              <div className="text-[10px] text-slate-400">Outer Action Pri: <span className="text-blue-400 font-bold">{tOuterPri === 15 ? 'Copy' : tOuterPri}</span></div>
-              <div className="text-[10px] text-slate-400">Outer Action VID: <span className="text-blue-400 font-bold">{tOuterVid === 4096 ? 'Copy' : tOuterVid}</span></div>
-              <div className="text-[10px] text-slate-400">Inner Action Pri: <span className="text-emerald-400 font-bold">{tInnerPri === 15 ? 'Copy' : tInnerPri}</span></div>
-              <div className="text-[10px] text-slate-400">Inner Action VID: <span className="text-emerald-400 font-bold">{tInnerVid === 4096 ? 'Copy' : tInnerVid}</span></div>
-            </div>
-          </div>
+        <div className="flex flex-wrap gap-2 p-2 bg-slate-900 border border-slate-800 rounded">
+          {validVlans.map((vlan, i) => (
+            <span key={i} className="px-2 py-1 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 rounded font-bold">
+              VLAN {vlan}
+            </span>
+          ))}
+          <span className="text-[8px] text-slate-500 self-center ml-2 italic">Total: {validVlans.length} IDs</span>
         </div>
       </div>
     );
   };
 
-  // Wireshark Style Inspector Component
-  const WiresharkInspector = ({ msg }: { msg: OmciMessage }) => {
-    const [expanded, setExpanded] = useState<Record<string, boolean>>({ protocol: true, header: true, contents: true });
-    const toggle = (key: string) => setExpanded(prev => ({ ...prev, [key]: !prev[key] }));
+  /**
+   * GIẢI MÃ BIT-LEVEL THEO CHUẨN G.988 (Table 9.3.13-1)
+   */
+  const decodeVlanTableEnhanced = (hexData: string) => {
+    const cleanHex = hexData.replace(/[^0-9a-fA-F]/g, '');
+    if (cleanHex.length < 32) return null;
+    
+    const entries = cleanHex.match(/.{1,32}/g) || [];
 
-    const Node = ({ label, children, toggleKey, indent = false }: any) => (
-      <div className={`font-mono text-[11px] ${indent ? 'ml-2' : ''}`}>
-        <div 
-          className="flex items-center gap-1 cursor-pointer hover:bg-blue-900/30 py-0.5 px-1 rounded transition-colors"
-          onClick={() => toggleKey && toggle(toggleKey)}
-        >
-          {toggleKey ? (
-            <i className={`fas fa-caret-${expanded[toggleKey] ? 'down' : 'right'} w-3 text-slate-500`}></i>
-          ) : <span className="w-3"></span>}
-          <span className={toggleKey ? "font-bold text-blue-400" : "text-slate-300"}>{label}</span>
-        </div>
-        {(!toggleKey || expanded[toggleKey]) && children && (
-          <div className="border-l border-slate-800 ml-1.5 pl-1.5 mb-1">{children}</div>
-        )}
-      </div>
-    );
-
-    const isMe171 = msg.meClass === '171' || msg.meClassName.toLowerCase().includes('extended vlan');
+    const getVid = (v: number) => v === 4096 || v === 0x800 ? 'Any (4096)' : (v === 4095 ? 'Untagged (4095)' : v);
+    const getPri = (p: number) => p === 15 ? 'Any (15)' : (p === 8 ? 'Untagged (8)' : p);
 
     return (
-      <div className="space-y-4">
-        <div className="grid grid-cols-2 gap-2">
-          <div className="p-2.5 bg-slate-950 rounded-xl border border-slate-800">
-            <p className="text-[8px] font-black text-slate-600 uppercase mb-0.5 tracking-widest">Entity</p>
-            <p className="text-[11px] font-bold text-blue-400 truncate">{msg.meClassName}</p>
-          </div>
-          <div className="p-2.5 bg-slate-950 rounded-xl border border-slate-800">
-            <p className="text-[8px] font-black text-slate-600 uppercase mb-0.5 tracking-widest">Instance</p>
-            <p className="text-[11px] font-mono font-bold text-white">{msg.meInstance}</p>
+      <div className="mt-4 space-y-4 select-text font-mono text-[10px]">
+        <div className="bg-indigo-950/40 border-l-2 border-indigo-500 p-2 mb-2">
+          <h5 className="text-[9px] font-black text-indigo-400 uppercase tracking-widest flex items-center gap-2">
+            <i className="fas fa-microchip"></i> VLAN TAGGING OPERATION TABLE DECODER
+          </h5>
+        </div>
+        
+        {entries.map((entryHex, idx) => {
+          if (entryHex.length < 32) return null;
+          const b = entryHex.match(/.{1,2}/g)!.map(byte => parseInt(byte, 16));
+          
+          const fOuterPri = (b[0] >> 4) & 0x0F;
+          const fOuterVid = ((b[0] & 0x0F) << 8) | b[1];
+          const fInnerPri = (b[2] >> 4) & 0x0F;
+          const fInnerVid = ((b[2] & 0x0F) << 8) | b[3];
+          const fEthType = b[4] & 0x03;
+
+          const removeTags = (b[5] >> 6) & 0x03;
+          const tOuterPri = (b[6] >> 4) & 0x0F;
+          const tOuterVid = ((b[6] & 0x0F) << 8) | b[7];
+          const tInnerPri = (b[8] >> 4) & 0x0F;
+          const tInnerVid = ((b[8] & 0x0F) << 8) | b[9];
+
+          return (
+            <div key={idx} className="bg-slate-900 border border-slate-800 rounded p-2">
+              <div className="text-indigo-400 font-bold mb-1">ENTRY {idx}</div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <div className="text-slate-500 uppercase text-[8px] font-black">Filter</div>
+                  <div>Outer Priority: {getPri(fOuterPri)}</div>
+                  <div>Outer VLAN ID: {getVid(fOuterVid)}</div>
+                  <div>Inner Priority: {getPri(fInnerPri)}</div>
+                  <div>Inner VLAN ID: {getVid(fInnerVid)}</div>
+                  <div>Ether Type: 0x0{fEthType}</div>
+                </div>
+                <div>
+                  <div className="text-slate-500 uppercase text-[8px] font-black">Treatment (Remove Tags={removeTags})</div>
+                  <div>Outer Priority: {tOuterPri === 15 ? 'Copy' : tOuterPri}</div>
+                  <div>Outer VLAN ID: {tOuterVid === 4096 ? 'Copy' : tOuterVid}</div>
+                  <div>Inner Priority: {tInnerPri === 15 ? 'Copy' : tInnerPri}</div>
+                  <div>Inner VLAN ID: {tInnerVid === 4096 ? 'Copy' : tInnerVid}</div>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    );
+  };
+
+  /**
+   * PACKET INSPECTOR COMPONENT:
+   * Chỉ hiển thị nội dung giao thức OMCI sạch sẽ.
+   */
+  const WiresharkInspector = ({ msg }: { msg: OmciMessage }) => {
+    const isMe171 = msg.meClass === '171' || msg.meClass === '00ab' || msg.meClassName.toLowerCase().includes('extended vlan');
+    const isMe84 = msg.meClass === '84' || msg.meClassName.toLowerCase().includes('vlan tagging filter');
+    const isOltToOnu = msg.direction === OmciDirection.OLT_TO_ONU;
+
+    // Lọc nội dung text protocol
+    const protocolStartIndex = msg.raw.indexOf('OMCI Protocol');
+    let omciTextRaw = protocolStartIndex !== -1 ? msg.raw.substring(protocolStartIndex) : msg.raw;
+    
+    const forbiddenTerms = [
+      "Transaction Correlation ID",
+      "Trailer",
+      "Device Identifier",
+      "Destination Bit",
+      "Acknowledge Request",
+      "Acknowledgement",
+      "Attribute Mask",
+      "CPCS-UU and CPI",
+      "CPCS-SDU Length",
+      "CRC32"
+    ];
+
+    const bitmaskRegex = /^[.\s01]+\s*=\s*/;
+    const summaryTerms = ["Message Type", "Managed Entity Class", "Managed Entity Instance"];
+
+    const lines = omciTextRaw.split('\n');
+    const filteredLines = lines.filter(line => {
+      const trimmedLine = line.trim();
+      if (!trimmedLine) return false;
+      if (bitmaskRegex.test(trimmedLine)) return false;
+      if (summaryTerms.some(term => trimmedLine.includes(term)) && !trimmedLine.includes('OMCI Protocol')) return false;
+      return !forbiddenTerms.some(term => line.includes(term));
+    });
+
+    const isTableAttr6 = (line: string) => line.includes('06') || line.toLowerCase().includes('tagging operation table');
+    const isVlanFilterListAttr = (line: string) => line.toLowerCase().includes('filter list') || line.includes('01:');
+
+    const getAssociationTypeLabel = (val: string) => {
+      const num = parseInt(val.match(/\d+/)?.[0] || "-1");
+      const labels: Record<number, string> = {
+        0: "MAC bridge port configuration data",
+        1: "IEEE 802.1p mapper service profile",
+        2: "Physical path termination point Ethernet UNI",
+        3: "IP host config data or IPv6 host config data",
+        4: "Physical path termination point xDSL UNI",
+        5: "GEM interworking termination point",
+        6: "Multicast GEM interworking termination point",
+        7: "Physical path termination point MoCA UNI",
+        9: "Ethernet flow termination point",
+        10: "Virtual Ethernet interface point",
+        11: "MPLS pseudowire termination point"
+      };
+      return labels[num] ? `${val} (${labels[num]})` : val;
+    };
+
+    return (
+      <div className="flex flex-col gap-6 animate-in fade-in duration-300">
+        
+        {/* Tóm tắt thông tin quan trọng phía trên */}
+        <div className="grid grid-cols-1 gap-3 px-2">
+          <div className="p-4 bg-slate-950 rounded-2xl border border-slate-800 shadow-xl space-y-2">
+             <div className="flex justify-between items-center border-b border-slate-800 pb-2">
+               <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Message Type</span>
+               <span className="text-[12px] font-bold text-blue-400">{msg.messageType}</span>
+             </div>
+             <div className="flex justify-between items-center border-b border-slate-800 pb-2">
+               <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Entity Class</span>
+               <span className="text-[12px] font-bold text-white">{msg.meClassName} ({msg.meClass})</span>
+             </div>
+             <div className="flex justify-between items-center">
+               <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Instance ID</span>
+               <span className="text-[12px] font-mono font-bold text-emerald-400">{msg.meInstance}</span>
+             </div>
           </div>
         </div>
 
-        <div className="bg-slate-950/50 rounded-xl border border-slate-800 p-2 overflow-hidden shadow-inner">
-          <Node label="OMCI Protocol (ITU-T G.988)" toggleKey="protocol">
-            <Node label={`Message Header`} toggleKey="header" indent>
-              <div className="pl-3 text-slate-400 space-y-0.5 select-text">
-                <div>Managed Entity Class: <span className="text-blue-300 font-bold">{msg.meClassName}</span> ({msg.meClass})</div>
-                <div>Managed Entity Instance: <span className="text-emerald-300 font-bold">{msg.meInstance}</span></div>
-              </div>
-            </Node>
-            <Node label="Message Contents" toggleKey="contents" indent>
-              <div className="pl-1 space-y-2 select-text">
-                {Object.entries(msg.data)
-                  .filter(([k]) => !k.includes('...')) // Bỏ bitwise flags rác
-                  .map(([k, v]) => {
-                    // Logic nhận diện Attribute List / Table
-                    const isTableAttr = k.toLowerCase().includes('table') || k.toLowerCase().includes('attribute list') || k.toLowerCase().includes('operation table');
-                    const hexValueMatch = (v as string).match(/\(([0-9a-fA-F]{32,})\)/) || (v as string).match(/([0-9a-fA-F]{32,})/);
-                    const hexValue = hexValueMatch ? hexValueMatch[1] : '';
+        {/* Protocol Attributes Section */}
+        <div className="bg-slate-950/80 rounded-2xl border border-slate-800 shadow-2xl p-6 overflow-hidden">
+          <div className="font-mono text-[11px] leading-relaxed select-text space-y-1">
+            {filteredLines.map((line, idx) => {
+              const isHeader = line.includes('OMCI Protocol');
+              const isAttrList = line.includes('Attribute List');
+              
+              let displayLine = line;
+              if (isMe171 && line.toLowerCase().includes('association type')) {
+                displayLine = getAssociationTypeLabel(line);
+              }
 
-                    return (
-                      <div key={k} className="group">
-                        <div className="flex gap-1.5 items-start">
-                          <span className="text-slate-500 font-bold min-w-[20px] group-hover:text-slate-400 transition-colors whitespace-nowrap">{k}:</span>
-                          <span className="text-white break-all leading-normal flex-1">{v as string}</span>
-                        </div>
-                        {/* Hiển thị giải mã chi tiết nếu là ME 171 và có hex data của bảng */}
-                        {isMe171 && isTableAttr && hexValue.length >= 32 && (
-                          <div className="mt-1">
-                            {decodeVlanTableDetailed(hexValue)}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                {Object.keys(msg.data).length === 0 && <div className="text-slate-600 italic pl-1">No attributes found in this message frame.</div>}
-              </div>
-            </Node>
-          </Node>
+              const hexMatch = line.match(/\(([0-9a-fA-F]{4,})\)/) || line.match(/([0-9a-fA-F]{4,})/);
+              const hexValue = hexMatch ? hexMatch[1] : '';
+
+              return (
+                <div key={idx} className="group">
+                  <div className={`
+                    ${isHeader ? 'text-white font-bold text-[13px] mb-2' : ''}
+                    ${isAttrList ? 'text-white font-bold mt-4 mb-2' : ''}
+                    ${!isHeader && !isAttrList ? 'text-slate-400' : ''}
+                  `}>
+                    {displayLine}
+                  </div>
+                  
+                  {/* Giải mã Extended VLAN (ME 171) */}
+                  {isMe171 && isOltToOnu && isTableAttr6(line) && hexValue.length >= 32 && (
+                    <div className="pl-4">
+                      {decodeVlanTableEnhanced(hexValue)}
+                    </div>
+                  )}
+
+                  {/* Giải mã VLAN Filter List (ME 84) */}
+                  {isMe84 && isVlanFilterListAttr(line) && hexValue.length >= 4 && (
+                    <div className="pl-4">
+                      {decodeVlanFilterList(hexValue)}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
         </div>
 
-        <div>
-          <p className="text-[9px] font-black text-slate-500 uppercase mb-2 tracking-widest px-1">Raw Frame Data</p>
-          <div className="bg-slate-950 p-3 rounded-xl border border-slate-800 font-mono text-[9px] text-slate-600 break-all leading-relaxed h-32 overflow-auto shadow-inner custom-scrollbar">
-            {msg.raw}
-          </div>
+        {/* Raw Frame Section - Hiển thị đúng text structure */}
+        <div className="space-y-2">
+           <h4 className="text-[9px] font-black text-slate-600 uppercase tracking-widest px-2">Raw File Context</h4>
+           <div className="bg-slate-950 p-4 rounded-xl border border-slate-900 shadow-inner max-h-[250px] overflow-auto custom-scrollbar">
+              <pre className="font-mono text-[10px] text-slate-700 whitespace-pre leading-relaxed select-all">
+                {msg.raw}
+              </pre>
+           </div>
         </div>
       </div>
     );
@@ -493,9 +590,9 @@ const App: React.FC = () => {
                       </thead>
                       <tbody>
                         {processedPackets.map((item) => {
-                          if (!searchTerm && directionFilter === 'both' && !onlyErrors && 'type' in item && item.type === 'group') {
+                          if ('type' in item && item.type === 'group') {
                             const isExpanded = expandedGroups[item.id];
-                            const groupTitle = item.messages[0].messageType.includes('Reset') ? 'MIB Reset Sequence' : 'MIB Sequence Block';
+                            const groupTitle = item.groupType === 'mib' ? 'MIB Setup Sequence' : 'Attribute Value Change Block';
                             return (
                               <React.Fragment key={item.id}>
                                 <tr onClick={() => setExpandedGroups(prev => ({ ...prev, [item.id]: !isExpanded }))} className="bg-indigo-950/20 border-y border-indigo-500/10 cursor-pointer hover:bg-indigo-900/30 group"><td colSpan={6} className="px-6 py-3"><div className="flex items-center gap-3 text-indigo-400 font-bold text-xs"><i className={`fas fa-chevron-${isExpanded ? 'down' : 'right'} transition-transform`}></i><span className="flex items-center gap-2"><i className="fas fa-layer-group opacity-50"></i>{groupTitle} ({item.messages.length} packets)</span></div></td></tr>
@@ -529,13 +626,13 @@ const App: React.FC = () => {
                     <h4 className="font-bold text-sm flex items-center gap-2 text-white"><i className="fas fa-search-plus text-blue-500"></i> Packet Inspector</h4>
                     {selectedMsg && <span className="text-[9px] font-mono text-slate-500">TX: {selectedMsg.transactionId}</span>}
                   </div>
-                  <div className="p-4 flex-1 overflow-auto bg-slate-900/40 custom-scrollbar">
+                  <div className="p-5 flex-1 overflow-auto bg-slate-900/40 custom-scrollbar">
                     {selectedMsg ? (
                       <WiresharkInspector msg={selectedMsg} />
                     ) : (
                       <div className="h-full flex flex-col items-center justify-center text-center opacity-30">
                          <i className="fas fa-microchip text-5xl mb-4"></i>
-                         <p className="text-sm font-medium">Select a packet to view <br/> detailed G.988 decoding.</p>
+                         <p className="text-sm font-medium px-10">Select an OMCI packet from the list to view its decoded G.988 attributes.</p>
                       </div>
                     )}
                   </div>

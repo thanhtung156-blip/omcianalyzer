@@ -7,22 +7,16 @@ export const parseOmciText = (text: string, forceHex: boolean = false): Analysis
   const serviceModel: ServiceLink[] = [];
   const pendingLinks = new Map<string, ServiceLink[]>();
 
-  // Tách text dựa trên tiêu đề cột của Wireshark: "No.     Time           Source"
-  // Mỗi khối sẽ bắt đầu từ dòng tiêu đề này cho đến trước dòng tiêu đề tiếp theo.
   const rawChunks = text.split(/(?=No\.\s+Time\s+Source)/i);
   
   const packetChunks = rawChunks.filter(c => {
     const trimmed = c.trim();
-    // Phải chứa từ khóa OMCI để được coi là gói tin OMCI hợp lệ
     return trimmed.length > 0 && trimmed.toLowerCase().includes('omci');
   });
   
   packetChunks.forEach((chunk, chunkIdx) => {
     const lines = chunk.split('\n').map(l => l.trim()).filter(l => l.length > 0);
     
-    // 1. Trích xuất Index (Số thứ tự gói tin thực tế)
-    // Trong Wireshark text export, dòng dữ liệu nằm ngay sau dòng tiêu đề "No. Time..."
-    // Dòng này thường bắt đầu bằng: "   174 9.664179 ..."
     let index = chunkIdx + 1;
     for (const line of lines) {
       const match = line.match(/^(\d+)\s+\d+\.\d+/);
@@ -32,8 +26,6 @@ export const parseOmciText = (text: string, forceHex: boolean = false): Analysis
       }
     }
 
-    // 2. Nhận diện hướng (Direction) chuẩn xác
-    // Ưu tiên tìm trong dòng "OMCI Protocol, ..."
     let direction = OmciDirection.OLT_TO_ONU;
     let summaryMeName = "";
     let summaryMsgType = "";
@@ -46,7 +38,6 @@ export const parseOmciText = (text: string, forceHex: boolean = false): Analysis
         direction = OmciDirection.OLT_TO_ONU;
       }
       
-      // Trích xuất Type và Entity từ dòng: "OMCI Protocol, OLT> Get - ONT-G"
       const summaryMatch = protocolLine.match(/,\s*(?:OLT>|ONU<)\s*([^-]+)\s*-\s*(.+)$/i);
       if (summaryMatch) {
         summaryMsgType = summaryMatch[1].trim();
@@ -54,41 +45,39 @@ export const parseOmciText = (text: string, forceHex: boolean = false): Analysis
       }
     }
 
-    // 3. Lấy Message Type chi tiết
     let messageType = summaryMsgType || "Unknown";
     const msgTypeDetailMatch = chunk.match(/Message Type\s*=\s*([^(\n\r]+)/i);
     if (msgTypeDetailMatch) {
       messageType = msgTypeDetailMatch[1].trim();
     }
 
-    // 4. Lấy ME Class
     let meClassName = summaryMeName || "Unknown Entity";
     let meClassId = "0";
-    const meClassMatch = chunk.match(/Managed Entity Class:\s*([^(\n\r]+)\s*\((\d+|0x[0-9a-fA-F]+)\)/i);
+    const meClassMatch = chunk.match(/Managed Entity Class:\s*([^(\n\r]+)\s*\((\d+|0x[0-9a-fA-F]+)\)/i) ||
+                        chunk.match(/ME Class:\s*([^(\n\r]+)\s*\((\d+|0x[0-9a-fA-F]+)\)/i);
     if (meClassMatch) {
       meClassName = meClassMatch[1].trim();
       meClassId = meClassMatch[2].trim();
     }
 
-    // 5. Lấy ME Instance
     let meInstance = "0x0000";
     const meInstMatch = chunk.match(/Managed Entity Instance:\s*(0x[0-9a-fA-F]+|\d+)/i) || 
-                       chunk.match(/Instance\s*=\s*(0x[0-9a-fA-F]+|\d+)/i);
+                       chunk.match(/Instance\s*=\s*(0x[0-9a-fA-F]+|\d+)/i) ||
+                       chunk.match(/ME Instance:\s*(0x[0-9a-fA-F]+|\d+)/i);
     if (meInstMatch) {
       meInstance = meInstMatch[1].startsWith('0x') ? 
         meInstMatch[1].toLowerCase() : 
         `0x${parseInt(meInstMatch[1]).toString(16).padStart(4, '0')}`;
     }
 
-    // 6. Lấy Transaction ID
     let transactionId = "0x0000";
     const txMatch = chunk.match(/Transaction Correlation ID:\s*(\d+)/i) || 
-                   chunk.match(/Transaction ID:\s*(0x[0-9a-fA-F]+|\d+)/i);
+                   chunk.match(/Transaction ID:\s*(0x[0-9a-fA-F]+|\d+)/i) ||
+                   chunk.match(/TX:\s*(0x[0-9a-fA-F]+)/i);
     if (txMatch) {
       transactionId = txMatch[1].startsWith('0x') ? txMatch[1] : `0x${parseInt(txMatch[1]).toString(16).padStart(4, '0')}`;
     }
 
-    // 7. Lấy Result (Success/Error)
     let resultCode: string | undefined = undefined;
     let isError = false;
     const resultMatch = chunk.match(/Result:\s*([^(]+)\s*\((\d+|0x[0-9a-fA-F]+)\)/i) || 
@@ -97,7 +86,7 @@ export const parseOmciText = (text: string, forceHex: boolean = false): Analysis
     if (resultMatch) {
       const rawRes = resultMatch[1].trim();
       resultCode = rawRes;
-      if (!/success|processed successfully|00|0x00/i.test(rawRes)) {
+      if (!/success|processed successfully|00|0x00|command processed successfully/i.test(rawRes)) {
         isError = true;
       }
     }
@@ -105,16 +94,26 @@ export const parseOmciText = (text: string, forceHex: boolean = false): Analysis
     const dataMap: Record<string, string> = {};
     const currentPendingLinks: ServiceLink[] = [];
 
-    // Parse attributes - Trích xuất các cặp key-value
+    // REFINED ATTRIBUTE PARSING
     for (const line of lines) {
       if (line.toLowerCase().includes('trailer')) break;
-      if (line.includes(':') && line.length > 5 && !/no\.|frame|ethernet|omci|transaction|identifier|managed entity|message type/i.test(line)) {
+      
+      // LOẠI BỎ CÁC DÒNG ĐIỀU KHIỂN VÀ HEADER TRIỆT ĐỂ
+      const isBitFlagLine = /^[01\.\s]+\s*=\s*/.test(line); 
+      const isWiresharkSummary = /^\d+\s+\d+\.\d+\s+/.test(line); 
+      const isMacAddrLine = /^[0-9a-f]{2}:[0-9a-f]{2}_[0-9a-f]{2}:[0-9a-f]{2}/i.test(line);
+      const isOmciSummary = line.includes('OLT>') || line.includes('ONU<');
+      const isProtocolMeta = /^(Transaction Correlation|Message Type|Device Identifier|Message Identifier|Managed Entity|Attribute Mask|OMCI Protocol|Frame \d+)/i.test(line);
+
+      if (line.includes(':') && !isBitFlagLine && !isWiresharkSummary && !isMacAddrLine && !isOmciSummary && !isProtocolMeta) {
         const parts = line.split(':');
         const key = parts[0].trim();
         const val = parts.slice(1).join(':').trim();
-        if (key && val) {
+        
+        // Bỏ các key rỗng hoặc key chỉ là bitflags
+        if (key && val && !/^[0\.]/.test(key)) {
           dataMap[key] = val;
-          // Logic tạo Service Model (dựa trên pointer)
+          // Logic mapping service model
           if (direction === OmciDirection.OLT_TO_ONU && (messageType.includes('Create') || messageType.includes('Set')) && 
               val.startsWith('0x') && /pointer|t-cont|gem|ani-g|uni|bridge|tp|iw/i.test(key)) {
              currentPendingLinks.push({
@@ -144,7 +143,6 @@ export const parseOmciText = (text: string, forceHex: boolean = false): Analysis
     });
   });
 
-  // Luôn sắp xếp theo số No. thực tế trong log Wireshark
   messages.sort((a, b) => a.index - b.index);
 
   messages.forEach(msg => {
